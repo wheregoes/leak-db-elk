@@ -1,7 +1,3 @@
-# leak-db-elk
- New version of leak-db
-
-
 # leak-db-v2.py
 **Description** <br />
 A simple leak database script. <br />
