@@ -13,7 +13,6 @@ A simple leak database script. <br />
 :heavy_check_mark: Can be used in background. <br />
 
 **Future Updates** <br />
-If there is new leaks, the script will create a report file. <br />
 ***Suggestions***
 
 Usage:
