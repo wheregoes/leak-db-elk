@@ -30,7 +30,10 @@ def log_message(message, log_file_path='script.log', level='info'):
     log_level = log_levels.get(level.lower(), 'INFO')
     timestamp = datetime.now().strftime('%Y-%m-%dT%H:%M:%S%z')
     
-    with open(os.path.join(LOGS_DIR, log_file_path), 'a') as log_file:
+    log_dir = os.path.join(LOGS_DIR)
+    os.makedirs(log_dir, exist_ok=True)
+
+    with open(os.path.join(log_dir, log_file_path), 'a') as log_file:
         log_file.write(f"{timestamp} - {log_level} - {message}\n")
         log_file.flush()
 
