@@ -14,7 +14,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # Suppress the specific Elasticsearch SecurityWarning
 warnings.filterwarnings('ignore', category=UserWarning, module='elasticsearch')
 
-ELASTICSEARCH_HOSTS = ['https://192.168.1.128:9200']
+ELASTICSEARCH_HOSTS = ['https://localhost:9200']
 ELASTICSEARCH_AUTH = ('elastic', 'changeme')
 LOGS_DIR = 'logs'
 

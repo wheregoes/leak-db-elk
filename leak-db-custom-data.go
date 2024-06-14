@@ -22,7 +22,7 @@ import (
 )
 
 const (
-	elasticsearchURL      = "https://192.168.1.128:9200"
+	elasticsearchURL      = "https://localhost:9200"
 	elasticsearchUser     = "elastic"
 	elasticsearchPassword = "changeme"
 	logsDir               = "logs"
