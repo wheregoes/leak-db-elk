@@ -1,5 +1,5 @@
 # leak-db-v2.py
-**Description** <br />
+**OUTDATED - Description - NEED UPDATE** <br />
 A simple leak database script. <br />
 
 **Requirements:**
