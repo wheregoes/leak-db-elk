@@ -28,6 +28,7 @@ const (
 	logsDir               = "logs"
 	maxThreads            = 10
 	chunkSize             = 1000
+	maxDocsPerIndex       = 1000000
 )
 
 var (
@@ -35,6 +36,8 @@ var (
 	infoLogger  *log.Logger
 	errorLogger *log.Logger
 	wg          sync.WaitGroup
+	indexedDocs int
+	indexSuffix string
 )
 
 func initElasticsearch() error {
@@ -64,20 +67,28 @@ func initElasticsearch() error {
 	return err
 }
 
-func createIndex(indexName string, properties map[string]interface{}) error {
+func createIndex(baseIndexName string, properties map[string]interface{}, suffix string) (string, error) {
+	indexName := fmt.Sprintf("%s-%s", baseIndexName, suffix)
 	exists, err := esClient.IndexExists(indexName).Do(context.Background())
 	if err != nil {
-		return err
+		return "", err
 	}
 
-	if !exists {
+	if exists {
+		fmt.Printf("Index '%s' already exists. Do you want to continue indexing in this index? (yes/no): ", indexName)
+		var response string
+		fmt.Scanln(&response)
+		if strings.ToLower(response) != "yes" {
+			return "", fmt.Errorf("user chose not to continue indexing in the existing index")
+		}
+	} else {
 		_, err = esClient.CreateIndex(indexName).BodyJson(map[string]interface{}{
 			"mappings": map[string]interface{}{
 				"properties": properties,
 			},
 		}).Do(context.Background())
 	}
-	return err
+	return indexName, err
 }
 
 func verifyFile(filePath string) error {
@@ -111,7 +122,7 @@ func initLoggers() error {
 	return nil
 }
 
-func logMessage(message string, level string) {
+func logMessage(message, level string) {
 	timestamp := time.Now().Format(time.RFC3339)
 	logEntry := fmt.Sprintf("%s - %s - %s\n", timestamp, strings.ToUpper(level), message)
 
@@ -135,6 +146,22 @@ func entryExists(indexName, hashValue string) (bool, error) {
 }
 
 func insertNewEntry(indexName, timestamp, hashValue, user, password, url, tag string) error {
+	if indexedDocs >= maxDocsPerIndex {
+		indexSuffix = fmt.Sprintf("%02d", indexedDocs/maxDocsPerIndex+1)
+		newIndexName, err := createIndex(strings.Split(indexName, "-")[0], map[string]interface{}{
+			"timestamp": map[string]string{"type": "date", "format": "strict_date_optional_time||epoch_second"},
+			"hash":      map[string]string{"type": "keyword"},
+			"user":      map[string]string{"type": "text"},
+			"pass":      map[string]string{"type": "text"},
+			"tag":       map[string]string{"type": "text"},
+		}, indexSuffix)
+		if err != nil {
+			return err
+		}
+		indexName = newIndexName
+		indexedDocs = 0
+	}
+
 	entry := map[string]interface{}{
 		"timestamp": timestamp,
 		"hash":      hashValue,
@@ -147,6 +174,9 @@ func insertNewEntry(indexName, timestamp, hashValue, user, password, url, tag st
 		Index(indexName).
 		BodyJson(entry).
 		Do(context.Background())
+	if err == nil {
+		indexedDocs++
+	}
 	return err
 }
 
@@ -249,13 +279,14 @@ func main() {
 
 	// Get current date
 	today := time.Now().Format("02-01-2006")
+	indexSuffix = "01"
 
-	var indexName string
+	var baseIndexName string
 	var properties map[string]interface{}
 	var delimiter string
 
 	if combolist {
-		indexName = fmt.Sprintf("combolists-leaks-%s", today)
+		baseIndexName = fmt.Sprintf("combolists-leaks-%s", today)
 		properties = map[string]interface{}{
 			"timestamp": map[string]string{"type": "date", "format": "strict_date_optional_time||epoch_second"},
 			"hash":      map[string]string{"type": "keyword"},
@@ -265,7 +296,7 @@ func main() {
 		}
 		delimiter = ":"
 	} else if infostealer {
-		indexName = fmt.Sprintf("infostealer-leaks-%s", today)
+		baseIndexName = fmt.Sprintf("infostealer-leaks-%s", today)
 		properties = map[string]interface{}{
 			"timestamp": map[string]string{"type": "date", "format": "strict_date_optional_time||epoch_second"},
 			"hash":      map[string]string{"type": "keyword"},
@@ -282,7 +313,7 @@ func main() {
 	}
 
 	logMessage("=============Script started=============", "info")
-	logMessage(fmt.Sprintf("Index: %s", indexName), "info")
+	logMessage(fmt.Sprintf("Base Index: %s", baseIndexName), "info")
 	logMessage(fmt.Sprintf("Tag: %s", tag), "info")
 
 	err := verifyFile(filePath)
@@ -298,8 +329,8 @@ func main() {
 		return
 	}
 
-	logMessage("Creating index...", "info")
-	err = createIndex(indexName, properties)
+	logMessage("Creating initial index...", "info")
+	indexName, err := createIndex(baseIndexName, properties, indexSuffix)
 	if err != nil {
 		logMessage(fmt.Sprintf("Failed to create index: %v", err), "error")
 		return
