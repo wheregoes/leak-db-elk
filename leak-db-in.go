@@ -247,12 +247,15 @@ func main() {
 		log.Fatal("File path and tag are required")
 	}
 
+	// Get current date
+	today := time.Now().Format("02-01-2006")
+
 	var indexName string
 	var properties map[string]interface{}
 	var delimiter string
 
 	if combolist {
-		indexName = "combolists-leaks"
+		indexName = fmt.Sprintf("combolists-leaks-%s", today)
 		properties = map[string]interface{}{
 			"timestamp": map[string]string{"type": "date", "format": "strict_date_optional_time||epoch_second"},
 			"hash":      map[string]string{"type": "keyword"},
@@ -262,7 +265,7 @@ func main() {
 		}
 		delimiter = ":"
 	} else if infostealer {
-		indexName = "infostealer-leaks"
+		indexName = fmt.Sprintf("infostealer-leaks-%s", today)
 		properties = map[string]interface{}{
 			"timestamp": map[string]string{"type": "date", "format": "strict_date_optional_time||epoch_second"},
 			"hash":      map[string]string{"type": "keyword"},
