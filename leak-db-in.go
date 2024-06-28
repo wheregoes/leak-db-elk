@@ -28,7 +28,8 @@ const (
 	logsDir               = "logs"
 	maxThreads            = 10
 	chunkSize             = 1000
-	maxDocsPerIndex       = 1000000
+	logInfo               = "info"
+	logError              = "error"
 )
 
 var (
@@ -36,12 +37,9 @@ var (
 	infoLogger  *log.Logger
 	errorLogger *log.Logger
 	wg          sync.WaitGroup
-	indexedDocs int
-	indexSuffix string
 )
 
 func initElasticsearch() error {
-	// Create a custom HTTP client that disables certificate verification
 	tr := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 		DialContext: (&net.Dialer{
@@ -62,33 +60,25 @@ func initElasticsearch() error {
 		elastic.SetSniff(false),
 		elastic.SetHealthcheck(false),
 		elastic.SetScheme("https"),
-		elastic.SetHttpClient(client), // Set the custom HTTP client
+		elastic.SetHttpClient(client),
 	)
 	return err
 }
 
-func createIndex(baseIndexName string, properties map[string]interface{}, suffix string) (string, error) {
-	indexName := fmt.Sprintf("%s-%s", baseIndexName, suffix)
+func createIndex(indexName string, properties map[string]interface{}) error {
 	exists, err := esClient.IndexExists(indexName).Do(context.Background())
 	if err != nil {
-		return "", err
+		return err
 	}
 
-	if exists {
-		fmt.Printf("Index '%s' already exists. Do you want to continue indexing in this index? (yes/no): ", indexName)
-		var response string
-		fmt.Scanln(&response)
-		if strings.ToLower(response) != "yes" {
-			return "", fmt.Errorf("user chose not to continue indexing in the existing index")
-		}
-	} else {
+	if !exists {
 		_, err = esClient.CreateIndex(indexName).BodyJson(map[string]interface{}{
 			"mappings": map[string]interface{}{
 				"properties": properties,
 			},
 		}).Do(context.Background())
 	}
-	return indexName, err
+	return err
 }
 
 func verifyFile(filePath string) error {
@@ -116,20 +106,20 @@ func initLoggers() error {
 		return err
 	}
 
-	infoLogger = log.New(infoLogFile, "", 0)
-	errorLogger = log.New(errorLogFile, "", 0)
+	infoLogger = log.New(infoLogFile, "", log.LstdFlags)
+	errorLogger = log.New(errorLogFile, "", log.LstdFlags)
 
 	return nil
 }
 
 func logMessage(message, level string) {
 	timestamp := time.Now().Format(time.RFC3339)
-	logEntry := fmt.Sprintf("%s - %s - %s\n", timestamp, strings.ToUpper(level), message)
+	logEntry := fmt.Sprintf("%s - %s - %s", timestamp, strings.ToUpper(level), message)
 
-	if level == "error" {
-		errorLogger.Print(logEntry)
+	if level == logError {
+		errorLogger.Println(logEntry)
 	} else {
-		infoLogger.Print(logEntry)
+		infoLogger.Println(logEntry)
 	}
 }
 
@@ -146,22 +136,6 @@ func entryExists(indexName, hashValue string) (bool, error) {
 }
 
 func insertNewEntry(indexName, timestamp, hashValue, user, password, url, tag string) error {
-	if indexedDocs >= maxDocsPerIndex {
-		indexSuffix = fmt.Sprintf("%02d", indexedDocs/maxDocsPerIndex+1)
-		newIndexName, err := createIndex(strings.Split(indexName, "-")[0], map[string]interface{}{
-			"timestamp": map[string]string{"type": "date", "format": "strict_date_optional_time||epoch_second"},
-			"hash":      map[string]string{"type": "keyword"},
-			"user":      map[string]string{"type": "text"},
-			"pass":      map[string]string{"type": "text"},
-			"tag":       map[string]string{"type": "text"},
-		}, indexSuffix)
-		if err != nil {
-			return err
-		}
-		indexName = newIndexName
-		indexedDocs = 0
-	}
-
 	entry := map[string]interface{}{
 		"timestamp": timestamp,
 		"hash":      hashValue,
@@ -174,65 +148,74 @@ func insertNewEntry(indexName, timestamp, hashValue, user, password, url, tag st
 		Index(indexName).
 		BodyJson(entry).
 		Do(context.Background())
-	if err == nil {
-		indexedDocs++
-	}
 	return err
 }
 
-func processLine(line, indexName, delimiter, tag string, combolist bool, bar *progressbar.ProgressBar) {
+func processBatch(lines []string, indexName, delimiter, tag string, combolist bool) {
 	defer wg.Done()
 
-	fields := strings.Split(strings.TrimSpace(line), delimiter)
+	bulkRequest := esClient.Bulk()
 	timestamp := time.Now().Format(time.RFC3339)
 
-	if combolist && len(fields) == 2 {
-		user, password := fields[0], fields[1]
-		hashValue := calculateHash(user + password)
-		exists, err := entryExists(indexName, hashValue)
-		if err != nil {
-			logMessage(fmt.Sprintf("Error checking entry existence: %v", err), "error")
-			return
-		}
-		if exists {
-			logMessage(fmt.Sprintf("Entry already exists: %s:%s", user, password), "info")
-		} else {
-			err := insertNewEntry(indexName, timestamp, hashValue, user, password, "", tag)
+	for _, line := range lines {
+		fields := strings.Split(strings.TrimSpace(line), delimiter)
+
+		if combolist && len(fields) == 2 {
+			user, password := fields[0], fields[1]
+			hashValue := calculateHash(user + password)
+			exists, err := entryExists(indexName, hashValue)
 			if err != nil {
-				logMessage(fmt.Sprintf("Error inserting new entry: %v", err), "error")
-			} else {
-				logMessage(fmt.Sprintf("Inserted new entry: %s:%s", user, password), "info")
+				logMessage(fmt.Sprintf("Error checking entry existence: %v", err), logError)
+				continue
 			}
-		}
-	} else if !combolist && len(fields) == 3 {
-		url, user, password := fields[0], fields[1], fields[2]
-		hashValue := calculateHash(url + user + password)
-		exists, err := entryExists(indexName, hashValue)
-		if err != nil {
-			logMessage(fmt.Sprintf("Error checking entry existence: %v", err), "error")
-			return
-		}
-		if exists {
-			logMessage(fmt.Sprintf("Entry already exists: %s:%s:%s", url, user, password), "info")
-		} else {
-			err := insertNewEntry(indexName, timestamp, hashValue, user, password, url, tag)
+			if !exists {
+				entry := map[string]interface{}{
+					"timestamp": timestamp,
+					"hash":      hashValue,
+					"user":      user,
+					"pass":      password,
+					"tag":       tag,
+				}
+				req := elastic.NewBulkIndexRequest().Index(indexName).Doc(entry)
+				bulkRequest = bulkRequest.Add(req)
+			}
+		} else if !combolist && len(fields) == 3 {
+			url, user, password := fields[0], fields[1], fields[2]
+			hashValue := calculateHash(url + user + password)
+			exists, err := entryExists(indexName, hashValue)
 			if err != nil {
-				logMessage(fmt.Sprintf("Error inserting new entry: %v", err), "error")
-			} else {
-				logMessage(fmt.Sprintf("Inserted new entry: %s:%s:%s", url, user, password), "info")
+				logMessage(fmt.Sprintf("Error checking entry existence: %v", err), logError)
+				continue
 			}
+			if !exists {
+				entry := map[string]interface{}{
+					"timestamp": timestamp,
+					"hash":      hashValue,
+					"url":       url,
+					"user":      user,
+					"pass":      password,
+					"tag":       tag,
+				}
+				req := elastic.NewBulkIndexRequest().Index(indexName).Doc(entry)
+				bulkRequest = bulkRequest.Add(req)
+			}
+		} else {
+			logMessage(fmt.Sprintf("Invalid input: %s", line), logError)
 		}
-	} else {
-		logMessage(fmt.Sprintf("Invalid input: %s", line), "error")
 	}
 
-	bar.Add(1)
+	if bulkRequest.NumberOfActions() > 0 {
+		_, err := bulkRequest.Do(context.Background())
+		if err != nil {
+			logMessage(fmt.Sprintf("Error inserting bulk entries: %v", err), logError)
+		}
+	}
 }
 
-func worker(lines <-chan string, indexName, delimiter, tag string, combolist bool, bar *progressbar.ProgressBar) {
-	for line := range lines {
+func worker(lines <-chan []string, indexName, delimiter, tag string, combolist bool) {
+	for batch := range lines {
 		wg.Add(1)
-		processLine(line, indexName, delimiter, tag, combolist, bar)
+		processBatch(batch, indexName, delimiter, tag, combolist)
 	}
 }
 
@@ -279,14 +262,13 @@ func main() {
 
 	// Get current date
 	today := time.Now().Format("02-01-2006")
-	indexSuffix = "01"
 
-	var baseIndexName string
+	var indexName string
 	var properties map[string]interface{}
 	var delimiter string
 
 	if combolist {
-		baseIndexName = fmt.Sprintf("combolists-leaks-%s", today)
+		indexName = fmt.Sprintf("combolists-leaks-%s", today)
 		properties = map[string]interface{}{
 			"timestamp": map[string]string{"type": "date", "format": "strict_date_optional_time||epoch_second"},
 			"hash":      map[string]string{"type": "keyword"},
@@ -296,7 +278,7 @@ func main() {
 		}
 		delimiter = ":"
 	} else if infostealer {
-		baseIndexName = fmt.Sprintf("infostealer-leaks-%s", today)
+		indexName = fmt.Sprintf("infostealer-leaks-%s", today)
 		properties = map[string]interface{}{
 			"timestamp": map[string]string{"type": "date", "format": "strict_date_optional_time||epoch_second"},
 			"hash":      map[string]string{"type": "keyword"},
@@ -312,68 +294,77 @@ func main() {
 		log.Fatalf("Failed to initialize loggers: %v", err)
 	}
 
-	logMessage("=============Script started=============", "info")
-	logMessage(fmt.Sprintf("Base Index: %s", baseIndexName), "info")
-	logMessage(fmt.Sprintf("Tag: %s", tag), "info")
+	logMessage("=============Script started=============", logInfo)
+	logMessage(fmt.Sprintf("Index: %s", indexName), logInfo)
+	logMessage(fmt.Sprintf("Tag: %s", tag), logInfo)
 
 	err := verifyFile(filePath)
 	if err != nil {
-		logMessage(fmt.Sprintf("File verification failed for '%s': %v", filePath, err), "error")
+		logMessage(fmt.Sprintf("File verification failed for '%s': %v", filePath, err), logError)
 		return
 	}
 
-	logMessage("Initializing Elasticsearch...", "info")
+	logMessage("Initializing Elasticsearch...", logInfo)
 	err = initElasticsearch()
 	if err != nil {
-		logMessage(fmt.Sprintf("Failed to initialize Elasticsearch: %v", err), "error")
+		logMessage(fmt.Sprintf("Failed to initialize Elasticsearch: %v", err), logError)
 		return
 	}
 
-	logMessage("Creating initial index...", "info")
-	indexName, err := createIndex(baseIndexName, properties, indexSuffix)
+	logMessage("Creating index...", logInfo)
+	err = createIndex(indexName, properties)
 	if err != nil {
-		logMessage(fmt.Sprintf("Failed to create index: %v", err), "error")
+		logMessage(fmt.Sprintf("Failed to create index: %v", err), logError)
 		return
 	}
 
 	// Count the total number of lines for the progress bar
 	totalLines, err := countLines(filePath)
 	if err != nil {
-		logMessage(fmt.Sprintf("Error counting lines in file: %v", err), "error")
+		logMessage(fmt.Sprintf("Error counting lines in file: %v", err), logError)
 		return
 	}
 
 	file, err := os.Open(filePath)
 	if err != nil {
-		logMessage(fmt.Sprintf("Failed to open file: %v", err), "error")
+		logMessage(fmt.Sprintf("Failed to open file: %v", err), logError)
 		return
 	}
 	defer file.Close()
 
 	bar := progressbar.Default(int64(totalLines))
-	lines := make(chan string, chunkSize)
+	lines := make(chan []string, chunkSize)
 
 	// Start worker pool
 	for i := 0; i < maxThreads; i++ {
-		go worker(lines, indexName, delimiter, tag, combolist, bar)
+		go worker(lines, indexName, delimiter, tag, combolist)
 	}
 
+	var batch []string
 	reader := bufio.NewReader(file)
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
 			if err == io.EOF {
+				if len(batch) > 0 {
+					lines <- batch
+				}
 				break
 			}
-			logMessage(fmt.Sprintf("Error reading file: %v", err), "error")
+			logMessage(fmt.Sprintf("Error reading file: %v", err), logError)
 			return
 		}
-		lines <- line
+		batch = append(batch, line)
+		if len(batch) >= chunkSize {
+			lines <- batch
+			batch = nil
+		}
+		bar.Add(1)
 	}
 
 	close(lines)
 	wg.Wait()
 
-	logMessage("=============Script finished=============", "info")
+	logMessage("=============Script finished=============", logInfo)
 	fmt.Println("Script finished successfully.")
 }

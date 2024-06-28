@@ -8,6 +8,7 @@ import logging
 import os
 import concurrent.futures
 from datetime import datetime
+import argparse
 
 # Set up logging to file
 log_dir = 'logs'
@@ -31,7 +32,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 warnings.filterwarnings('ignore', category=UserWarning, module='elasticsearch')
 
 # Configuration for old Elasticsearch cluster
-old_es_host = 'https://192.168.3.22:9200'
+old_es_host = 'https://localhost:9200'
 old_index = 'combolists-leaks'
 
 # Authentication credentials
@@ -40,6 +41,11 @@ password = 'changeme'
 
 # Maximum number of documents per index
 max_docs_per_index = 10000000
+
+# Parse command-line arguments
+parser = argparse.ArgumentParser(description='Reindex Elasticsearch indices.')
+parser.add_argument('--reindex-without-asking', action='store_true', help='Recreate indices without asking for confirmation.')
+args = parser.parse_args()
 
 # Helper function to connect to Elasticsearch with retries
 def connect_es(host, basic_auth, max_retries=5, delay=5):
@@ -72,19 +78,19 @@ disallowed_settings = ['creation_date', 'provided_name', 'uuid', 'version']
 filtered_settings = {k: v for k, v in old_index_settings.items() if k not in disallowed_settings}
 
 # Function to create a new index with retry and backoff
-def create_new_index(new_es, base_index_name, index_suffix, max_retries=5):
+def create_new_index(new_es, base_index_name, index_suffix, reindex_without_asking, max_retries=5):
     new_index = f"{base_index_name}-{index_suffix}"
     for attempt in range(max_retries):
         try:
             if new_es.indices.exists(index=new_index):
                 logger.warning(f"Index '{new_index}' already exists.")
-                proceed = input(f"Index '{new_index}' already exists. Do you want to continue and overwrite it? (yes/no): ")
-                if proceed.lower() != 'yes':
-                    logger.info("Operation cancelled by the user.")
-                    exit(0)
-                else:
-                    new_es.indices.delete(index=new_index)
-                    logger.info(f"Deleted existing index '{new_index}'.")
+                if not reindex_without_asking:
+                    proceed = input(f"Index '{new_index}' already exists. Do you want to continue and overwrite it? (yes/no): ")
+                    if proceed.lower() != 'yes':
+                        logger.info("Operation cancelled by the user.")
+                        exit(0)
+                new_es.indices.delete(index=new_index)
+                logger.info(f"Deleted existing index '{new_index}'.")
             new_es.indices.create(index=new_index, body={
                 'settings': filtered_settings,
                 'mappings': old_index_mappings
@@ -115,13 +121,15 @@ def reindex_chunk(data_chunk, new_es, current_new_index):
     return len(data_chunk['hits']['hits'])
 
 # Connect to new Elasticsearch cluster
-new_es_host = 'https://192.168.3.21:9200'
+new_es_host = 'https://localhost:9200'
 new_es = connect_es(new_es_host, basic_auth=(username, password))
 
 # Generate the initial new index name
 base_new_index = 'combolist-leaks'
-current_index_suffix = datetime.now().strftime("%d-%m-%Y") + "-01"
-current_new_index = create_new_index(new_es, base_new_index, current_index_suffix)
+date_suffix = datetime.now().strftime("%d-%m-%Y")
+suffix_count = 1
+current_index_suffix = f"{date_suffix}-{suffix_count:02d}"
+current_new_index = create_new_index(new_es, base_new_index, current_index_suffix, args.reindex_without_asking)
 
 # Get the total number of documents in the old index
 total_docs = old_es.count(index=old_index)['count']
@@ -164,8 +172,9 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=4) as executor:
             
             # Check if the current new index has reached the maximum document count
             if indexed_docs >= max_docs_per_index:
-                current_index_suffix = datetime.now().strftime("%d-%m-%Y") + f"-{int(current_index_suffix[-2:]) + 1:02d}"
-                current_new_index = create_new_index(new_es, base_new_index, current_index_suffix)
+                suffix_count += 1
+                current_index_suffix = f"{date_suffix}-{suffix_count:02d}"
+                current_new_index = create_new_index(new_es, base_new_index, current_index_suffix, args.reindex_without_asking)
                 indexed_docs = 0
 
 # Close the progress bar
